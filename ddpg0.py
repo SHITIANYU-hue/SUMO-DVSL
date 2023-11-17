@@ -8,9 +8,14 @@ Created on Thu Dec  6 01:36:24 2018
 
 from __future__ import division
 #from Priority_Replay import SumTree, Memory
-import tensorflow as tf
+# import tensorflow as tf
 import numpy as np
 import time
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import torch.nn.functional as F
+
 
 import os
 import sys
@@ -33,101 +38,116 @@ RENDER = False
 ###############################  DDPG  ####################################
 
 
+
+
+# Constants
+MEMORY_CAPACITY = 10000
+BATCH_SIZE = 64
+LR_A = 0.001
+LR_C = 0.002
+TAU = 0.01
+GAMMA = 0.9
+
+class Actor(nn.Module):
+    def __init__(self, s_dim, a_dim):
+        super(Actor, self).__init__()
+        self.fc1 = nn.Linear(s_dim, 60)
+        self.fc2 = nn.Linear(60, a_dim)
+
+    def forward(self, s):
+        neta = F.relu(self.fc1(s))
+        a = torch.sigmoid(self.fc2(neta)) * 8
+        return a
+
+class Critic(nn.Module):
+    def __init__(self, s_dim, a_dim):
+        super(Critic, self).__init__()
+        self.fc1_s = nn.Linear(s_dim, 50)
+        self.fc1_a = nn.Linear(a_dim, 50)
+        self.fc2 = nn.Linear(100, 1)
+
+    def forward(self, s, a):
+        netc = F.relu(self.fc1_s(s) + self.fc1_a(a))
+        return self.fc2(netc)
+
 class VSL_DDPG_PR(object):
-    def __init__(self, a_dim, s_dim,):
-        #self.memory = Memory(capacity=MEMORY_CAPACITY)
+    def __init__(self, a_dim, s_dim):
         self.memory = np.zeros((MEMORY_CAPACITY, s_dim * 2 + a_dim + 1), dtype=np.float32)
         self.pointer = 0
-        self.sess = tf.Session()
 
         self.a_dim, self.s_dim = a_dim, s_dim
-        self.S = tf.placeholder(tf.float32, [None, s_dim], 's')
-        self.S_ = tf.placeholder(tf.float32, [None, s_dim], 's_')
-        self.R = tf.placeholder(tf.float32, [None, 1], 'r')
 
-        self.a = self._build_a(self.S,)
-        q = self._build_c(self.S, self.a, )
-        a_params = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope='Actor')
-        c_params = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope='Critic')
-        ema = tf.train.ExponentialMovingAverage(decay=1 - TAU)          # soft replacement
+        self.actor = Actor(s_dim, a_dim)
+        self.actor_target = Actor(s_dim, a_dim)
+        self.actor_target.load_state_dict(self.actor.state_dict())
 
-        def ema_getter(getter, name, *args, **kwargs):
-            return ema.average(getter(name, *args, **kwargs))
+        self.critic = Critic(s_dim, a_dim)
+        self.critic_target = Critic(s_dim, a_dim)
+        self.critic_target.load_state_dict(self.critic.state_dict())
 
-        target_update = [ema.apply(a_params), ema.apply(c_params)]      # soft update operation
-        a_ = self._build_a(self.S_, reuse=True, custom_getter=ema_getter)   # replaced target parameters
-        q_ = self._build_c(self.S_, a_, reuse=True, custom_getter=ema_getter)
+        self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=LR_A)
+        self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=LR_C)
 
-        a_loss = - tf.reduce_mean(q)  # maximize the q
-        self.atrain = tf.train.AdamOptimizer(LR_A).minimize(a_loss, var_list=a_params)
-        self.td = self.R + GAMMA * q_ - q
-
-        with tf.control_dependencies(target_update):    # soft replacement happened at here
-            q_target = self.R + GAMMA * q_ 
-            td_error = tf.losses.mean_squared_error(labels=q_target, predictions=q)
-            self.ctrain = tf.train.AdamOptimizer(LR_C).minimize(td_error, var_list=c_params)
-
-        self.sess.run(tf.global_variables_initializer())
-        self.saver = tf.train.Saver(max_to_keep = 1)
-        
-    
     def choose_action(self, s):
-        return self.sess.run(self.a, {self.S: s[np.newaxis, :]})[0]
-    
+        s = torch.FloatTensor(s).unsqueeze(0)
+        return self.actor(s).detach().numpy().flatten()
 
     def learn(self):
-#        tree_idx, bt, ISWeights = self.memory.sample(BATCH_SIZE)
         indices = np.random.choice(MEMORY_CAPACITY, size=BATCH_SIZE)
-        bt = self.memory[indices, :]
+        bt = torch.FloatTensor(self.memory[indices, :])
         bs = bt[:, :self.s_dim]
         ba = bt[:, self.s_dim: self.s_dim + self.a_dim]
         br = bt[:, -self.s_dim - 1: -self.s_dim]
         bs_ = bt[:, -self.s_dim:]
 
-        self.sess.run(self.atrain, {self.S: bs})
-        self.sess.run(self.ctrain, {self.S: bs, self.a: ba, self.R: br, self.S_: bs_})
+        a_target = self.actor_target(bs_)
+        q_ = self.critic_target(bs_, a_target).detach()
 
+        q_target = br + GAMMA * q_
 
-#    def store_transition(self, s, a, r, s_):
-#        transition = np.hstack((s, a, r, s_))
-#        self.memory.store(transition) 
+        q = self.critic(bs, ba)
+        critic_loss = F.mse_loss(q, q_target)
+
+        self.critic_optimizer.zero_grad()
+        critic_loss.backward()
+        self.critic_optimizer.step()
+
+        a_loss = -self.critic(bs, self.actor(bs)).mean()
+
+        self.actor_optimizer.zero_grad()
+        a_loss.backward()
+        self.actor_optimizer.step()
+
+        # Soft update for target networks
+        for target_param, param in zip(self.actor_target.parameters(), self.actor.parameters()):
+            target_param.data.copy_((1 - TAU) * target_param.data + TAU * param.data)
+
+        for target_param, param in zip(self.critic_target.parameters(), self.critic.parameters()):
+            target_param.data.copy_((1 - TAU) * target_param.data + TAU * param.data)
+
     def store_transition(self, s, a, r, s_):
         transition = np.hstack((s, a, [r], s_))
-        index = self.pointer % MEMORY_CAPACITY  # replace the old memory with new memory
+        index = self.pointer % MEMORY_CAPACITY
         self.memory[index, :] = transition
         self.pointer += 1
 
+    def savemodel(self):
+        torch.save(self.actor.state_dict(), 'ddpg_networkss_withoutexplore/ddpg_actor.pth')
+        torch.save(self.critic.state_dict(), 'ddpg_networkss_withoutexplore/ddpg_critic.pth')
 
-    def _build_a(self, s, reuse=None, custom_getter=None):
-        trainable = True if reuse is None else False
-        with tf.variable_scope('Actor', reuse=reuse, custom_getter=custom_getter):
-            neta = tf.layers.dense(s, 60, activation=tf.nn.relu, name='l1', trainable=trainable)
-            a = tf.layers.dense(neta, self.a_dim, activation=tf.nn.sigmoid, name='l2', trainable=trainable,  use_bias=False)
-            return tf.multiply(a, 8, name='scaled_a')
+    def loadmodel(self):
+        self.actor.load_state_dict(torch.load('ddpg_networkss_withoutexplore/ddpg_actor.pth'))
+        self.actor_target.load_state_dict(self.actor.state_dict())
+        self.critic.load_state_dict(torch.load('ddpg_networkss_withoutexplore/ddpg_critic.pth'))
+        self.critic_target.load_state_dict(self.critic.state_dict())
 
-    def _build_c(self, s, a, reuse=None, custom_getter=None):
-        trainable = True if reuse is None else False
-        with tf.variable_scope('Critic', reuse=reuse, custom_getter=custom_getter):
-            n_l1 = 50
-            w1_s = tf.get_variable('w1_s', [self.s_dim, n_l1], trainable=trainable)
-            w1_a = tf.get_variable('w1_a', [self.a_dim, n_l1], trainable=trainable)
-            b1 = tf.get_variable('b1', [1, n_l1], trainable=trainable)
-            netc = tf.nn.relu(tf.matmul(s, w1_s) + tf.matmul(a, w1_a) + b1)
-            return tf.layers.dense(netc, 1, trainable=trainable)  
-    
-    def savemodel(self,):
-        self.saver.save(self.sess,'ddpg_networkss_withoutexplore/' + 'ddpg.ckpt')
-        
-    def loadmodel(self,):
-        loader = tf.train.import_meta_graph('ddpg_networkss_withoutexplore/ddpg.ckpt.meta')
-        loader.restore(self.sess, tf.train.latest_checkpoint("ddpg_networkss_withoutexplore/"))
         
 def from_a_to_mlv(a):
     return 17.8816 + 2.2352*np.floor(a)
 
 
 vsl_controller = VSL_DDPG_PR(s_dim = 13, a_dim = 5)
-net = rm_vsl_co(visualization = False)
+net = rm_vsl_co(visualization = True)
 total_step = 0
 var = 1.5
 att = []
