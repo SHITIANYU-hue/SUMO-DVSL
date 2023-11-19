@@ -132,6 +132,8 @@ class VSL_DDPG_PR(object):
         self.pointer += 1
 
     def savemodel(self):
+        save_dir = 'ddpg_networkss_withoutexplore/'
+        os.makedirs(save_dir, exist_ok=True)
         torch.save(self.actor.state_dict(), 'ddpg_networkss_withoutexplore/ddpg_actor.pth')
         torch.save(self.critic.state_dict(), 'ddpg_networkss_withoutexplore/ddpg_critic.pth')
 
@@ -147,7 +149,7 @@ def from_a_to_mlv(a):
 
 
 vsl_controller = VSL_DDPG_PR(s_dim = 13, a_dim = 5)
-net = rm_vsl_co(visualization = True)
+net = rm_vsl_co(visualization = False)
 total_step = 0
 var = 1.5
 att = []
