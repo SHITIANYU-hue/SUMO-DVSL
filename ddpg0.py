@@ -67,8 +67,11 @@ class Critic(nn.Module):
         self.fc2 = nn.Linear(100, 1)
 
     def forward(self, s, a):
-        netc = F.relu(self.fc1_s(s) + self.fc1_a(a))
+        h_s = F.relu(self.fc1_s(s))
+        h_a = F.relu(self.fc1_a(a))
+        netc = torch.cat([h_s, h_a], dim=1)
         return self.fc2(netc)
+
 
 class VSL_DDPG_PR(object):
     def __init__(self, a_dim, s_dim):
@@ -132,10 +135,10 @@ class VSL_DDPG_PR(object):
         self.pointer += 1
 
     def savemodel(self):
-        save_dir = 'ddpg_networkss_withoutexplore/'
+        save_dir = 'ddpg_networkss_withoutexplore2/'
         os.makedirs(save_dir, exist_ok=True)
-        torch.save(self.actor.state_dict(), 'ddpg_networkss_withoutexplore/ddpg_actor.pth')
-        torch.save(self.critic.state_dict(), 'ddpg_networkss_withoutexplore/ddpg_critic.pth')
+        torch.save(self.actor.state_dict(), f'{save_dir}ddpg_actor.pth')
+        torch.save(self.critic.state_dict(), f'{save_dir}ddpg_critic.pth')
 
     def loadmodel(self):
         self.actor.load_state_dict(torch.load('ddpg_networkss_withoutexplore/ddpg_actor.pth'))
